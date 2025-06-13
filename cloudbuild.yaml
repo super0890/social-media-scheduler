@@ -1,56 +1,24 @@
-# Cloud Build configuration for social media scheduler
-steps:
-  # Step 1: Install dependencies
-  - name: 'node:18'
-    entrypoint: 'npm'
-    args: ['install']
+# Use Python 3.9 slim image
+FROM python:3.9-slim
 
-  # Step 2: Run tests (optional)
-  - name: 'node:18'
-    entrypoint: 'npm'
-    args: ['test']
-    env:
-      - 'CI=true'
+# Set working directory
+WORKDIR /app
 
-  # Step 3: Build the application
-  - name: 'node:18'
-    entrypoint: 'npm'
-    args: ['run', 'build']
+# Copy requirements first for better caching
+COPY requirements.txt .
 
-  # Step 4: Build Docker image
-  - name: 'gcr.io/cloud-builders/docker'
-    args: [
-      'build',
-      '-t', 'gcr.io/$PROJECT_ID/social-media-scheduler:$BUILD_ID',
-      '-t', 'gcr.io/$PROJECT_ID/social-media-scheduler:latest',
-      '.'
-    ]
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
 
-  # Step 5: Push Docker image to Container Registry
-  - name: 'gcr.io/cloud-builders/docker'
-    args: [
-      'push', 'gcr.io/$PROJECT_ID/social-media-scheduler:$BUILD_ID'
-    ]
+# Copy application code
+COPY main.py .
 
-  # Step 6: Deploy to Cloud Run (optional)
-  - name: 'gcr.io/cloud-builders/gcloud'
-    args: [
-      'run', 'deploy', 'social-media-scheduler',
-      '--image', 'gcr.io/$PROJECT_ID/social-media-scheduler:$BUILD_ID',
-      '--region', 'us-central1',
-      '--platform', 'managed',
-      '--allow-unauthenticated'
-    ]
+# Expose port 8080 (Cloud Run default)
+EXPOSE 8080
 
-# Store images in Container Registry
-images:
-  - 'gcr.io/$PROJECT_ID/social-media-scheduler:$BUILD_ID'
-  - 'gcr.io/$PROJECT_ID/social-media-scheduler:latest'
+# Set environment variable for Flask
+ENV FLASK_APP=main.py
+ENV PYTHONUNBUFFERED=1
 
-# Build options
-options:
-  logging: CLOUD_LOGGING_ONLY
-  machineType: 'E2_STANDARD_2'
-
-# Timeout for the entire build
-timeout: '1200s'
+# Use gunicorn as the production WSGI server
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "1", "--timeout", "300", "main:app"]
