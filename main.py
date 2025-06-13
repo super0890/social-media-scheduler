@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Social Media Auto Poster with Flask HTTP Server
-Includes Instagram fix, all functionality, and web interface
+Complete version for Google Cloud Run deployment
 """
 
 import requests
@@ -14,7 +14,11 @@ from io import BytesIO, StringIO
 import tempfile
 from flask import Flask, jsonify, request, render_template_string
 import threading
-import schedule
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class SocialMediaPoster:
     def __init__(self):
@@ -44,11 +48,10 @@ class SocialMediaPoster:
             else:
                 csv_url = spreadsheet_url + '/export?format=csv'
             
-            print(f"📡 Fetching data from Google Sheets...")
-            print(f"   URL: {csv_url}")
+            logger.info(f"Fetching data from Google Sheets: {csv_url}")
             
             # Download the CSV data
-            response = requests.get(csv_url)
+            response = requests.get(csv_url, timeout=30)
             response.raise_for_status()
             
             # Load into pandas DataFrame
@@ -57,24 +60,21 @@ class SocialMediaPoster:
             # Clean column names (remove extra spaces)
             df.columns = df.columns.str.strip()
             
-            print(f"📊 Successfully loaded {len(df)} rows from Google Sheets")
-            print(f"📋 Columns found: {list(df.columns)}")
+            logger.info(f"Successfully loaded {len(df)} rows from Google Sheets")
             
             return df
             
         except Exception as e:
-            print(f"❌ Error loading Google Spreadsheet: {e}")
-            print("💡 Make sure your Google Sheet is shared publicly (Anyone with the link can view)")
+            logger.error(f"Error loading Google Spreadsheet: {e}")
             return None
 
     def download_image_from_url(self, image_url):
         """Download image from URL and return temporary file path"""
         try:
-            print(f"📥 Downloading image from: {image_url}")
+            logger.info(f"Downloading image from: {image_url}")
             
             # Handle Google Drive URLs
             if 'drive.google.com' in image_url:
-                # Extract file ID from Google Drive URL
                 if '/file/d/' in image_url:
                     file_id = image_url.split('/file/d/')[1].split('/')[0]
                     image_url = f"https://drive.google.com/uc?export=download&id={file_id}"
@@ -87,7 +87,7 @@ class SocialMediaPoster:
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
             }
             
-            response = requests.get(image_url, headers=headers, stream=True)
+            response = requests.get(image_url, headers=headers, stream=True, timeout=30)
             response.raise_for_status()
             
             # Create temporary file
@@ -101,12 +101,12 @@ class SocialMediaPoster:
             
             # Verify file size
             file_size = os.path.getsize(temp_file.name)
-            print(f"✅ Image downloaded successfully ({file_size} bytes)")
+            logger.info(f"Image downloaded successfully ({file_size} bytes)")
             
             return temp_file.name
             
         except Exception as e:
-            print(f"❌ Error downloading image from {image_url}: {e}")
+            logger.error(f"Error downloading image from {image_url}: {e}")
             return None
 
     def cleanup_temp_file(self, file_path):
@@ -115,7 +115,7 @@ class SocialMediaPoster:
             if file_path and os.path.exists(file_path):
                 os.unlink(file_path)
         except Exception as e:
-            print(f"⚠️  Warning: Could not delete temp file {file_path}: {e}")
+            logger.warning(f"Could not delete temp file {file_path}: {e}")
 
     def parse_datetime(self, date_str, time_str):
         """Parse date and time strings into datetime object"""
@@ -143,7 +143,7 @@ class SocialMediaPoster:
                     continue
             
             if parsed_date is None:
-                print(f"❌ Could not parse date: {date_str}")
+                logger.error(f"Could not parse date: {date_str}")
                 return None
             
             # Handle various time formats
@@ -157,7 +157,7 @@ class SocialMediaPoster:
             
             # Try to parse time
             parsed_time = None
-            time_str = str(time_str).strip().upper()  # Convert to uppercase for PM/AM
+            time_str = str(time_str).strip().upper()
             
             for fmt in time_formats:
                 try:
@@ -168,7 +168,7 @@ class SocialMediaPoster:
                     continue
             
             if parsed_time is None:
-                print(f"❌ Could not parse time: {time_str}")
+                logger.error(f"Could not parse time: {time_str}")
                 return None
             
             # Combine date and time
@@ -176,7 +176,7 @@ class SocialMediaPoster:
             return full_datetime
             
         except Exception as e:
-            print(f"❌ Error parsing datetime - Date: {date_str}, Time: {time_str}, Error: {e}")
+            logger.error(f"Error parsing datetime - Date: {date_str}, Time: {time_str}, Error: {e}")
             return None
 
     def is_time_to_post(self, scheduled_datetime, tolerance_minutes=10):
@@ -185,97 +185,84 @@ class SocialMediaPoster:
             return False
         
         current_time = datetime.now()
-        time_diff = abs((current_time - scheduled_datetime).total_seconds() / 60)  # difference in minutes
+        time_diff = abs((current_time - scheduled_datetime).total_seconds() / 60)
         
-        # Check if current time is within tolerance of scheduled time
         is_ready = time_diff <= tolerance_minutes
         
         if is_ready:
-            print(f"✅ Time to post! Scheduled: {scheduled_datetime.strftime('%Y-%m-%d %H:%M')}, Current: {current_time.strftime('%Y-%m-%d %H:%M')}")
-        else:
-            print(f"⏰ Not time yet. Scheduled: {scheduled_datetime.strftime('%Y-%m-%d %H:%M')}, Current: {current_time.strftime('%Y-%m-%d %H:%M')}, Diff: {time_diff:.1f} min")
+            logger.info(f"Time to post! Scheduled: {scheduled_datetime.strftime('%Y-%m-%d %H:%M')}")
         
         return is_ready
 
     def upload_image_to_facebook(self, image_path, caption, hashtags):
         """Upload image to Facebook page"""
         try:
-            # Combine caption and hashtags
             full_message = f"{caption}\n\n{hashtags}"
             
-            # Prepare the request
             files = {'source': open(image_path, 'rb')}
             data = {
                 'message': full_message,
                 'access_token': self.access_token
             }
             
-            response = requests.post(self.facebook_api_url, files=files, data=data)
+            response = requests.post(self.facebook_api_url, files=files, data=data, timeout=60)
             files['source'].close()
             
             if response.status_code == 200:
                 result = response.json()
-                print(f"✅ Facebook post successful! Post ID: {result.get('id', 'Unknown')}")
+                logger.info(f"Facebook post successful! Post ID: {result.get('id', 'Unknown')}")
                 return True, result.get('id')
             else:
                 error_msg = response.json().get('error', {}).get('message', 'Unknown error')
-                print(f"❌ Facebook post failed: {error_msg}")
+                logger.error(f"Facebook post failed: {error_msg}")
                 return False, error_msg
                 
         except Exception as e:
-            print(f"❌ Facebook upload error: {e}")
+            logger.error(f"Facebook upload error: {e}")
             return False, str(e)
 
     def upload_image_to_instagram(self, image_url, caption, hashtags):
         """Upload image to Instagram using image_url parameter (2-step process)"""
         try:
-            # Step 1: Create media container using image_url
             full_caption = f"{caption}\n\n{hashtags}"
             
-            # Instagram requires image_url parameter, not file upload
             data = {
-                'image_url': image_url,  # Use the original URL directly
+                'image_url': image_url,
                 'caption': full_caption,
                 'access_token': self.access_token
             }
             
-            response = requests.post(self.instagram_api_url, data=data)
+            response = requests.post(self.instagram_api_url, data=data, timeout=60)
             
             if response.status_code != 200:
                 error_msg = response.json().get('error', {}).get('message', 'Unknown error')
-                print(f"❌ Instagram media creation failed: {error_msg}")
+                logger.error(f"Instagram media creation failed: {error_msg}")
                 return False, error_msg
             
             container_id = response.json().get('id')
-            print(f"📷 Instagram media container created: {container_id}")
+            logger.info(f"Instagram media container created: {container_id}")
             
-            # Step 2: Publish the media
-            time.sleep(2)  # Wait a moment before publishing
+            time.sleep(2)
             
             publish_data = {
                 'creation_id': container_id,
                 'access_token': self.access_token
             }
             
-            publish_response = requests.post(self.instagram_publish_url, data=publish_data)
+            publish_response = requests.post(self.instagram_publish_url, data=publish_data, timeout=60)
             
             if publish_response.status_code == 200:
                 result = publish_response.json()
-                print(f"✅ Instagram post successful! Post ID: {result.get('id', 'Unknown')}")
+                logger.info(f"Instagram post successful! Post ID: {result.get('id', 'Unknown')}")
                 return True, result.get('id')
             else:
                 error_msg = publish_response.json().get('error', {}).get('message', 'Unknown error')
-                print(f"❌ Instagram publish failed: {error_msg}")
+                logger.error(f"Instagram publish failed: {error_msg}")
                 return False, error_msg
                 
         except Exception as e:
-            print(f"❌ Instagram upload error: {e}")
+            logger.error(f"Instagram upload error: {e}")
             return False, str(e)
-
-    def update_google_sheet_status(self, spreadsheet_url, row_index, new_status):
-        """Note: This would require Google Sheets API credentials to write back to the sheet."""
-        print(f"📝 Status update needed for row {row_index + 1}: {new_status}")
-        print("💡 To automatically update status in Google Sheets, you'll need to set up Google Sheets API")
 
     def get_pending_posts(self, spreadsheet_url=None):
         """Get all pending posts from the spreadsheet"""
@@ -329,21 +316,18 @@ class SocialMediaPoster:
         return posts_data
 
     def process_scheduled_posts(self, spreadsheet_url=None, tolerance_minutes=10):
-        """Process posts that are scheduled for the current time from Google Spreadsheet"""
+        """Process posts that are scheduled for the current time"""
         if not spreadsheet_url:
             spreadsheet_url = self.default_spreadsheet_url
             
         df = self.load_google_spreadsheet(spreadsheet_url)
         
         if df is None:
-            print("❌ Could not load Google Spreadsheet data")
             return []
         
-        print(f"📊 Loaded {len(df)} posts from Google Spreadsheet")
-        current_time = datetime.now()
-        print(f"🕐 Current time: {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"Loaded {len(df)} posts from Google Spreadsheet")
         
-        # Map your specific column names
+        # Map column names
         date_col = 'Date'
         time_col = 'Post Timings'
         caption_col = 'Caption'
@@ -351,24 +335,16 @@ class SocialMediaPoster:
         imageurl_col = 'Filename.jpg'
         status_col = 'Status'
         
-        print(f"📋 Using columns:")
-        print(f"   Date: {date_col}")
-        print(f"   Time: {time_col}")
-        print(f"   Caption: {caption_col}")
-        print(f"   Hashtags: {hashtags_col}")
-        print(f"   Image URL: {imageurl_col}")
-        print(f"   Status: {status_col}")
-        
-        # Filter posts that haven't been posted yet
+        # Filter pending posts
         pending_posts = df[
             (df[status_col].astype(str).str.lower().isin(['pending', 'scheduled', ''])) |
             (df[status_col].isna()) |
             (df[status_col].astype(str).str.strip() == '')
         ].copy()
         
-        print(f"📝 Found {len(pending_posts)} pending posts")
+        logger.info(f"Found {len(pending_posts)} pending posts")
         
-        # Filter posts that are scheduled for now (within tolerance)
+        # Filter posts ready to publish
         ready_posts = []
         
         for index, row in pending_posts.iterrows():
@@ -376,9 +352,7 @@ class SocialMediaPoster:
                 date_val = row[date_col]
                 time_val = row[time_col]
                 
-                # Skip if date or time is empty/NaN
-                if pd.isna(date_val) or pd.isna(time_val) or str(date_val).strip() == '' or str(time_val).strip() == '':
-                    print(f"⚠️  Skipping row {index + 1}: Missing date or time")
+                if pd.isna(date_val) or pd.isna(time_val):
                     continue
                 
                 scheduled_datetime = self.parse_datetime(date_val, time_val)
@@ -391,12 +365,11 @@ class SocialMediaPoster:
                     })
                     
             except Exception as e:
-                print(f"❌ Error checking schedule for row {index + 1}: {e}")
+                logger.error(f"Error checking schedule for row {index + 1}: {e}")
         
-        print(f"🎯 Found {len(ready_posts)} posts ready to publish now")
+        logger.info(f"Found {len(ready_posts)} posts ready to publish")
         
         if len(ready_posts) == 0:
-            print("😴 No posts scheduled for this time.")
             return []
         
         results = []
@@ -404,7 +377,6 @@ class SocialMediaPoster:
         for post_info in ready_posts:
             index = post_info['index']
             row = post_info['row']
-            scheduled_datetime = post_info['scheduled_datetime']
             temp_image_path = None
             
             try:
@@ -412,103 +384,58 @@ class SocialMediaPoster:
                 caption = str(row[caption_col]).strip()
                 hashtags = str(row[hashtags_col]).strip()
                 
-                print(f"\n📌 Processing post for: {scheduled_datetime.strftime('%Y-%m-%d %H:%M')}")
-                print(f"   Image URL: {image_url}")
-                print(f"   Caption: {caption[:50]}...")
+                logger.info(f"Processing post for row {index + 1}")
                 
-                # For Facebook: Download image and upload file
+                # Download image for Facebook
                 temp_image_path = self.download_image_from_url(image_url)
                 
                 if not temp_image_path:
-                    print(f"❌ Could not download image from: {image_url}")
                     results.append({
                         'index': index,
                         'image_url': image_url,
+                        'caption': caption,
                         'facebook_success': False,
                         'instagram_success': False,
                         'error': 'Could not download image'
                     })
                     continue
                 
-                # Post to Facebook (uses downloaded file)
-                print("📘 Posting to Facebook...")
+                # Post to Facebook
                 fb_success, fb_result = self.upload_image_to_facebook(temp_image_path, caption, hashtags)
-                
-                # Wait between posts to avoid rate limits
                 time.sleep(3)
                 
-                # Post to Instagram (uses original URL directly)
-                print("📷 Posting to Instagram...")
+                # Post to Instagram
                 ig_success, ig_result = self.upload_image_to_instagram(image_url, caption, hashtags)
                 
-                # Record results
                 results.append({
                     'index': index,
                     'image_url': image_url,
+                    'caption': caption,
                     'facebook_success': fb_success,
                     'instagram_success': ig_success,
                     'facebook_result': fb_result,
                     'instagram_result': ig_result
                 })
                 
-                # Update status
-                if fb_success and ig_success:
-                    new_status = 'Posted'
-                elif fb_success or ig_success:
-                    new_status = 'Partially Posted'
-                else:
-                    new_status = 'Failed'
-                
-                self.update_google_sheet_status(spreadsheet_url, index, new_status)
-                
-                # Wait between posts
                 time.sleep(5)
                 
             except Exception as e:
-                print(f"❌ Error processing post at row {index + 1}: {e}")
+                logger.error(f"Error processing post at row {index + 1}: {e}")
                 results.append({
                     'index': index,
                     'image_url': row.get(imageurl_col, 'unknown'),
+                    'caption': str(row.get(caption_col, '')),
                     'facebook_success': False,
                     'instagram_success': False,
                     'error': str(e)
                 })
             finally:
-                # Clean up temporary image file
                 if temp_image_path:
                     self.cleanup_temp_file(temp_image_path)
         
-        # Print summary
-        self.print_summary(results)
-        
         return results
 
-    def print_summary(self, results):
-        """Print a summary of posting results"""
-        print("\n" + "="*50)
-        print("📊 POSTING SUMMARY")
-        print("="*50)
-        
-        total = len(results)
-        fb_success = sum(1 for r in results if r['facebook_success'])
-        ig_success = sum(1 for r in results if r['instagram_success'])
-        both_success = sum(1 for r in results if r['facebook_success'] and r['instagram_success'])
-        
-        print(f"Total posts processed: {total}")
-        print(f"Facebook successful: {fb_success}/{total}")
-        print(f"Instagram successful: {ig_success}/{total}")
-        print(f"Both platforms successful: {both_success}/{total}")
-        
-        # Show failed posts
-        failed_posts = [r for r in results if not (r['facebook_success'] and r['instagram_success'])]
-        if failed_posts:
-            print(f"\n❌ Failed/Partial posts ({len(failed_posts)}):")
-            for post in failed_posts:
-                print(f"   • Row {post['index'] + 1}: {post.get('image_url', 'Unknown URL')}")
-                if 'error' in post:
-                    print(f"     Error: {post['error']}")
-
-# Flask Web App
+# Initialize Flask app
 app = Flask(__name__)
 poster = SocialMediaPoster()
 
@@ -553,7 +480,6 @@ HTML_TEMPLATE = """
         </p>
         
         <div style="text-align: center; margin: 20px 0;">
-            <button class="button" onclick="checkScheduled()">📅 Check Scheduled Posts</button>
             <button class="button" onclick="runScheduler()">▶️ Run Scheduler Now</button>
             <button class="button" onclick="viewPendingPosts()">📋 View Pending Posts</button>
             <button class="button danger" onclick="location.reload()">🔄 Refresh Page</button>
@@ -572,6 +498,9 @@ HTML_TEMPLATE = """
             const now = new Date();
             document.getElementById('current-time').textContent = now.toLocaleString();
         }
+        
+        setInterval(updateTime, 1000);
+        updateTime();
         
         function showLoading() {
             document.getElementById('loading').style.display = 'block';
@@ -592,7 +521,7 @@ HTML_TEMPLATE = """
                 html += `<div class="info status">ℹ️ ${data.message}</div>`;
             } else if (data.results && data.results.length > 0) {
                 html += `<div class="success status">✅ Processed ${data.results.length} posts</div>`;
-                html += '<table><tr><th>Row</th><th>Image</th><th>Caption</th><th>Facebook</th><th>Instagram</th><th>Status</th></tr>';
+                html += '<table><tr><th>Row</th><th>Caption</th><th>Facebook</th><th>Instagram</th><th>Status</th></tr>';
                 
                 data.results.forEach(result => {
                     const fbStatus = result.facebook_success ? '✅' : '❌';
@@ -601,7 +530,6 @@ HTML_TEMPLATE = """
                     
                     html += `<tr>
                         <td>${result.index + 1}</td>
-                        <td><img src="${result.image_url}" class="image-preview" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgdmlld0JveD0iMCAwIDEwMCAxMDAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHJlY3Qgd2lkdGg9IjEwMCIgaGVpZ2h0PSIxMDAiIGZpbGw9IiNmMGYwZjAiLz48dGV4dCB4PSI1MCIgeT0iNTAiIGZvbnQtZmFtaWx5PSJBcmlhbCIgZm9udC1zaXplPSIxMiIgZmlsbD0iIzk5OSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZHk9Ii4zZW0iPk5vIEltYWdlPC90ZXh0Pjwvc3ZnPg=='"></td>
                         <td>${caption}</td>
                         <td>${fbStatus}</td>
                         <td>${igStatus}</td>
@@ -622,7 +550,137 @@ HTML_TEMPLATE = """
                         </div>
                         <div class="post-content">
                             <strong>Caption:</strong> ${post.caption}<br>
-                            <strong>Hashtags:</strong> ${post.hashtags}<br>
-                            <strong>Image:</strong> <a href="${post.image_url}" target="_blank">View Image</a>
+                            <strong>Hashtags:</strong> ${post.hashtags}
                         </div>
-                    </div
+                    </div>`;
+                });
+            } else {
+                html += `<div class="info status">ℹ️ No posts found</div>`;
+            }
+            
+            document.getElementById('results').innerHTML = html;
+        }
+        
+        function runScheduler() {
+            showLoading();
+            fetch('/api/run-scheduler', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => displayResults(data, '📅 Scheduler Results'))
+                .catch(error => {
+                    hideLoading();
+                    document.getElementById('results').innerHTML = `<div class="error status">❌ Error: ${error.message}</div>`;
+                });
+        }
+        
+        function viewPendingPosts() {
+            showLoading();
+            fetch('/api/pending-posts')
+                .then(response => response.json())
+                .then(data => displayResults(data, '📋 Pending Posts'))
+                .catch(error => {
+                    hideLoading();
+                    document.getElementById('results').innerHTML = `<div class="error status">❌ Error: ${error.message}</div>`;
+                });
+        }
+    </script>
+</body>
+</html>
+"""
+
+# Routes
+@app.route('/')
+def index():
+    """Main dashboard page"""
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/health')
+def health_check():
+    """Health check endpoint for Google Cloud Run"""
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': datetime.now().isoformat(),
+        'service': 'social-media-poster'
+    })
+
+@app.route('/api/run-scheduler', methods=['POST'])
+def run_scheduler():
+    """Run the post scheduler manually"""
+    try:
+        logger.info("Manual scheduler run triggered")
+        
+        # Get tolerance from request or use default
+        tolerance = request.json.get('tolerance', 10) if request.is_json else 10
+        
+        # Process scheduled posts
+        results = poster.process_scheduled_posts(tolerance_minutes=tolerance)
+        
+        if not results:
+            return jsonify({
+                'message': 'No posts scheduled for this time',
+                'results': [],
+                'total_processed': 0
+            })
+        
+        # Calculate summary stats
+        total = len(results)
+        fb_success = sum(1 for r in results if r['facebook_success'])
+        ig_success = sum(1 for r in results if r['instagram_success'])
+        both_success = sum(1 for r in results if r['facebook_success'] and r['instagram_success'])
+        
+        return jsonify({
+            'message': f'Processed {total} posts',
+            'results': results,
+            'total_processed': total,
+            'facebook_success': fb_success,
+            'instagram_success': ig_success,
+            'both_success': both_success
+        })
+        
+    except Exception as e:
+        logger.error(f"Error running scheduler: {e}")
+        return jsonify({
+            'error': str(e)
+        }), 500
+
+@app.route('/api/pending-posts')
+def get_pending_posts():
+    """Get all pending posts"""
+    try:
+        posts = poster.get_pending_posts()
+        
+        return jsonify({
+            'posts': posts,
+            'total_pending': len(posts)
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting pending posts: {e}")
+        return jsonify({
+            'error': str(e)
+        }), 500
+
+@app.route('/api/status')
+def get_status():
+    """Get system status"""
+    try:
+        return jsonify({
+            'status': 'online',
+            'timestamp': datetime.now().isoformat(),
+            'service': 'social-media-poster',
+            'version': '1.0.0'
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting status: {e}")
+        return jsonify({
+            'error': str(e)
+        }), 500
+
+if __name__ == '__main__':
+    # Get port from environment variable or use default
+    port = int(os.environ.get('PORT', 8080))
+    
+    logger.info(f"Starting Social Media Auto Poster server on port {port}")
+    
+    # Run the Flask app
+    app.run(host='0.0.0.0', port=port, debug=False)
