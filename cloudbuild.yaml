@@ -39,10 +39,6 @@ images:
   - 'gcr.io/$PROJECT_ID/social-media-scheduler:$BUILD_ID'
   - 'gcr.io/$PROJECT_ID/social-media-scheduler:latest'
 
-# Build options
-options:
-  logging: CLOUD_LOGGING_ONLY
-
 # Timeout for the entire build
 timeout: '1200s'
 EOF
