@@ -1,6 +1,12 @@
-cat > requirements.txt << 'EOF'
-Flask==2.3.3
-requests==2.31.0
-pandas==2.0.3
+# Web Framework
+Flask==3.0.0
 gunicorn==21.2.0
-EOF
+
+# HTTP Requests  
+requests==2.31.0
+
+# Data Processing
+pandas==2.1.4
+
+# File I/O and Utilities (built-in modules, no need to install)
+# os, time, datetime, json, io, tempfile, threading, logging are built-in
