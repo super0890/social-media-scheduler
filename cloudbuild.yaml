@@ -42,7 +42,6 @@ images:
 # Build options
 options:
   logging: CLOUD_LOGGING_ONLY
-  machineType: 'E2_STANDARD_2'
 
 # Timeout for the entire build
 timeout: '1200s'
