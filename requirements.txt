@@ -1,0 +1,7 @@
+pandas
+requests
+gspread
+oauth2client
+google-auth
+facebook-sdk
+python-dotenv
