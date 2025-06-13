@@ -1,3 +1,4 @@
+cat > Dockerfile << 'EOF'
 # Use Python 3.9 slim image
 FROM python:3.9-slim
 
@@ -22,3 +23,4 @@ ENV PYTHONUNBUFFERED=1
 
 # Use gunicorn as the production WSGI server
 CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "1", "--timeout", "300", "main:app"]
+EOF
