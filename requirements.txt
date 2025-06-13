@@ -1,7 +1,5 @@
-pandas
-requests
-gspread
-oauth2client
-google-auth
-facebook-sdk
-python-dotenv
+Flask==2.3.3
+requests==2.31.0
+pandas==2.1.1
+gunicorn==21.2.0
+Werkzeug==2.3.7
