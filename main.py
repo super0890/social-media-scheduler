@@ -15,72 +15,117 @@ import tempfile
 from flask import Flask, jsonify, request, render_template_string
 import threading
 import logging
+import gspread # New import for Google Sheets interaction
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class SocialMediaPoster:
     def __init__(self):
-        # Facebook/Instagram API credentials
-        self.app_id = "3708785246080823"
-        self.app_secret = "ee87767617658dfa4d14ac841bff7efa"
-        self.access_token = "EAA0tHtskDzcBOxTOZAxwepQvXGtZAXFixZBP054XoctjXPZAgIwltuwAr2d0rLy6cYR7YR4MFwfRiaSHxR3ZAIyrjsF22AnjnciZCYCl4odHBaa136jgkjjaIEXm0oXN9HEdh3ZCM70oUGkTr7WwkZA07nga8I39rFzEt4w0YiZAwhMDIxutjD8kyC8FzoYgTDbCxxBoNV4W2S8B933zxr8oZD"
-        self.facebook_page_id = "105017102705551"
-        self.instagram_id = "17841468677012084"
+        # Facebook/Instagram API credentials from environment variables
+        self.app_id = os.getenv("FB_APP_ID", "YOUR_FB_APP_ID")
+        self.app_secret = os.getenv("FB_APP_SECRET", "YOUR_FB_APP_SECRET")
+        self.access_token = os.getenv("FB_ACCESS_TOKEN", "YOUR_FB_ACCESS_TOKEN")
+        self.facebook_page_id = os.getenv("FB_PAGE_ID", "YOUR_FB_PAGE_ID")
+        self.instagram_id = os.getenv("INSTAGRAM_BUSINESS_ACCOUNT_ID", "YOUR_IG_BUSINESS_ACCOUNT_ID")
         
         # API endpoints
         self.facebook_api_url = f"https://graph.facebook.com/v18.0/{self.facebook_page_id}/photos"
         self.instagram_api_url = f"https://graph.facebook.com/v18.0/{self.instagram_id}/media"
         self.instagram_publish_url = f"https://graph.facebook.com/v18.0/{self.instagram_id}/media_publish"
         
-        # Default spreadsheet URL
-        self.default_spreadsheet_url = "https://docs.google.com/spreadsheets/d/14mo8-qCZNcOeNSsY_GRwHOPyH4LjY5iRneWahK75cZM/edit?pli=1&gid=0#gid=0"
+        # Default spreadsheet URL from environment variable
+        self.default_spreadsheet_url = os.getenv("SPREADSHEET_URL", "https://docs.google.com/spreadsheets/d/14mo8-qCZNcOeNSsY_GRwHOPyH4LjY5iRneWahK75cZM/edit?pli=1&gid=0#gid=0")
 
-    def load_google_spreadsheet(self, spreadsheet_url):
-        """Load data directly from Google Spreadsheet using CSV export URL"""
+        # Initialize gspread client (assuming Google Cloud service account authentication)
+        # For local development, you might need to set GOOGLE_APPLICATION_CREDENTIALS environment variable
         try:
-            # Convert Google Sheets URL to CSV export URL
-            if '/edit' in spreadsheet_url:
-                csv_url = spreadsheet_url.replace('/edit#gid=0', '/export?format=csv&gid=0')
-                csv_url = csv_url.replace('/edit?pli=1&gid=0#gid=0', '/export?format=csv&gid=0')
-                csv_url = csv_url.replace('/edit', '/export?format=csv')
+            self.gc = gspread.service_account()
+            logger.info("Successfully initialized gspread client.")
+        except Exception as e:
+            logger.error(f"Error initializing gspread client: {e}. Make sure GOOGLE_APPLICATION_CREDENTIALS is set for service account authentication.")
+            self.gc = None # Set to None if initialization fails
+
+    def load_google_spreadsheet(self, spreadsheet_url: str):
+        """Load data directly from Google Spreadsheet using CSV export URL or gspread if available"""
+        try:
+            if self.gc and 'docs.google.com/spreadsheets/d/' in spreadsheet_url:
+                # Attempt to use gspread for better integration and less reliance on CSV export
+                spreadsheet_id = spreadsheet_url.split('/d/')[1].split('/')[0]
+                worksheet = self.gc.open_by_id(spreadsheet_id).get_worksheet(0) # Assumes first worksheet
+                data = worksheet.get_all_values()
+                df = pd.DataFrame(data[1:], columns=data[0])
+                logger.info(f"Successfully loaded {len(df)} rows from Google Sheets using gspread.")
+                return df
             else:
-                csv_url = spreadsheet_url + '/export?format=csv'
-            
-            logger.info(f"Fetching data from Google Sheets: {csv_url}")
-            
-            # Download the CSV data
-            response = requests.get(csv_url, timeout=30)
-            response.raise_for_status()
-            
-            # Load into pandas DataFrame
-            df = pd.read_csv(StringIO(response.text))
-            
-            # Clean column names (remove extra spaces)
-            df.columns = df.columns.str.strip()
-            
-            logger.info(f"Successfully loaded {len(df)} rows from Google Sheets")
-            
-            return df
+                # Fallback to CSV export if gspread not initialized or URL not supported
+                if '/edit' in spreadsheet_url:
+                    csv_url = spreadsheet_url.replace('/edit#gid=0', '/export?format=csv&gid=0')
+                    csv_url = csv_url.replace('/edit?pli=1&gid=0#gid=0', '/export?format=csv&gid=0')
+                    csv_url = csv_url.replace('/edit', '/export?format=csv')
+                else:
+                    csv_url = spreadsheet_url + '/export?format=csv'
+                
+                logger.info(f"Fetching data from Google Sheets via CSV export: {csv_url}")
+                
+                response = requests.get(csv_url, timeout=30)
+                response.raise_for_status()
+                
+                df = pd.read_csv(StringIO(response.text))
+                df.columns = df.columns.str.strip()
+                logger.info(f"Successfully loaded {len(df)} rows from Google Sheets via CSV export.")
+                return df
             
         except Exception as e:
-            logger.error(f"Error loading Google Spreadsheet: {e}")
+            logger.error(f"Error loading Google Spreadsheet from {spreadsheet_url}: {e}")
             return None
 
-    def download_image_from_url(self, image_url):
+    def update_google_spreadsheet_status(self, row_index: int, status: str, spreadsheet_url: str = None):
+        """Update the 'Status' column in the Google Spreadsheet for a given row index."""
+        if not self.gc:
+            logger.warning("gspread client not initialized. Cannot update Google Spreadsheet status.")
+            return
+
+        if not spreadsheet_url:
+            spreadsheet_url = self.default_spreadsheet_url
+
+        try:
+            spreadsheet_id = spreadsheet_url.split('/d/')[1].split('/')[0]
+            worksheet = self.gc.open_by_id(spreadsheet_id).get_worksheet(0) # Assumes first worksheet
+            
+            # Find the 'Status' column index (assuming header row)
+            headers = worksheet.row_values(1)
+            try:
+                status_col_index = headers.index('Status') + 1 # gspread is 1-indexed
+            except ValueError:
+                logger.error("'Status' column not found in spreadsheet. Cannot update status.")
+                return
+
+            # Update the cell. row_index from pandas is 0-indexed, so add 2 (1 for header, 1 for 0-indexing)
+            # This assumes your sheet index directly corresponds to the pandas DataFrame index + 2 (for header + 0-indexing)
+            # You might need to adjust this logic if your sheet has filters or hidden rows.
+            worksheet.update_cell(row_index + 2, status_col_index, status)
+            logger.info(f"Spreadsheet row {row_index + 1} updated to status: '{status}'")
+        except Exception as e:
+            logger.error(f"Error updating Google Spreadsheet status for row {row_index + 1}: {e}")
+
+
+    def download_image_from_url(self, image_url: str) -> str | None:
         """Download image from URL and return temporary file path"""
         try:
-            logger.info(f"Downloading image from: {image_url}")
+            logger.info(f"Attempting to download image from: {image_url}")
             
             # Handle Google Drive URLs
             if 'drive.google.com' in image_url:
                 if '/file/d/' in image_url:
                     file_id = image_url.split('/file/d/')[1].split('/')[0]
                     image_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+                    logger.info(f"Converted Google Drive URL to export URL: {image_url}")
                 elif 'id=' in image_url:
                     file_id = image_url.split('id=')[1].split('&')[0]
                     image_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+                    logger.info(f"Converted Google Drive URL (id format) to export URL: {image_url}")
             
             # Download the image
             headers = {
@@ -88,7 +133,7 @@ class SocialMediaPoster:
             }
             
             response = requests.get(image_url, headers=headers, stream=True, timeout=30)
-            response.raise_for_status()
+            response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
             
             # Create temporary file
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
@@ -101,23 +146,27 @@ class SocialMediaPoster:
             
             # Verify file size
             file_size = os.path.getsize(temp_file.name)
-            logger.info(f"Image downloaded successfully ({file_size} bytes)")
+            logger.info(f"Image downloaded successfully to {temp_file.name} ({file_size} bytes)")
             
             return temp_file.name
             
+        except requests.exceptions.RequestException as req_err:
+            logger.error(f"Network or request error downloading image from {image_url}: {req_err}")
+            return None
         except Exception as e:
             logger.error(f"Error downloading image from {image_url}: {e}")
             return None
 
-    def cleanup_temp_file(self, file_path):
+    def cleanup_temp_file(self, file_path: str):
         """Clean up temporary file"""
         try:
             if file_path and os.path.exists(file_path):
                 os.unlink(file_path)
+                logger.info(f"Cleaned up temporary file: {file_path}")
         except Exception as e:
             logger.warning(f"Could not delete temp file {file_path}: {e}")
 
-    def parse_datetime(self, date_str, time_str):
+    def parse_datetime(self, date_str: str, time_str: str) -> datetime | None:
         """Parse date and time strings into datetime object"""
         try:
             # Handle various date formats
@@ -133,7 +182,6 @@ class SocialMediaPoster:
                 '%b %d, %Y',     # Jun 12, 2025
             ]
             
-            # Try to parse date
             parsed_date = None
             for fmt in date_formats:
                 try:
@@ -143,7 +191,7 @@ class SocialMediaPoster:
                     continue
             
             if parsed_date is None:
-                logger.error(f"Could not parse date: {date_str}")
+                logger.error(f"Could not parse date: '{date_str}'")
                 return None
             
             # Handle various time formats
@@ -155,20 +203,19 @@ class SocialMediaPoster:
                 '%I:%M:%S %p'    # 1:00:00 PM
             ]
             
-            # Try to parse time
             parsed_time = None
-            time_str = str(time_str).strip().upper()
+            time_str_upper = str(time_str).strip().upper() # Convert once
             
             for fmt in time_formats:
                 try:
-                    time_obj = datetime.strptime(time_str, fmt).time()
+                    time_obj = datetime.strptime(time_str_upper, fmt).time()
                     parsed_time = time_obj
                     break
                 except ValueError:
                     continue
             
             if parsed_time is None:
-                logger.error(f"Could not parse time: {time_str}")
+                logger.error(f"Could not parse time: '{time_str}'")
                 return None
             
             # Combine date and time
@@ -176,10 +223,10 @@ class SocialMediaPoster:
             return full_datetime
             
         except Exception as e:
-            logger.error(f"Error parsing datetime - Date: {date_str}, Time: {time_str}, Error: {e}")
+            logger.error(f"Unhandled error parsing datetime - Date: '{date_str}', Time: '{time_str}', Error: {e}")
             return None
 
-    def is_time_to_post(self, scheduled_datetime, tolerance_minutes=10):
+    def is_time_to_post(self, scheduled_datetime: datetime, tolerance_minutes: int = 10) -> bool:
         """Check if it's time to post based on scheduled datetime"""
         if scheduled_datetime is None:
             return False
@@ -190,11 +237,11 @@ class SocialMediaPoster:
         is_ready = time_diff <= tolerance_minutes
         
         if is_ready:
-            logger.info(f"Time to post! Scheduled: {scheduled_datetime.strftime('%Y-%m-%d %H:%M')}")
+            logger.info(f"Time to post! Scheduled: {scheduled_datetime.strftime('%Y-%m-%d %H:%M')}, Current: {current_time.strftime('%Y-%m-%d %H:%M')}")
         
         return is_ready
 
-    def upload_image_to_facebook(self, image_path, caption, hashtags):
+    def upload_image_to_facebook(self, image_path: str, caption: str, hashtags: str) -> tuple[bool, str]:
         """Upload image to Facebook page"""
         try:
             full_message = f"{caption}\n\n{hashtags}"
@@ -205,23 +252,28 @@ class SocialMediaPoster:
                 'access_token': self.access_token
             }
             
+            logger.info(f"Attempting to upload image to Facebook from {image_path}...")
             response = requests.post(self.facebook_api_url, files=files, data=data, timeout=60)
             files['source'].close()
             
             if response.status_code == 200:
                 result = response.json()
-                logger.info(f"Facebook post successful! Post ID: {result.get('id', 'Unknown')}")
-                return True, result.get('id')
+                post_id = result.get('id', 'Unknown')
+                logger.info(f"Facebook post successful! Post ID: {post_id}")
+                return True, post_id
             else:
-                error_msg = response.json().get('error', {}).get('message', 'Unknown error')
-                logger.error(f"Facebook post failed: {error_msg}")
+                error_msg = response.json().get('error', {}).get('message', 'Unknown Facebook error')
+                logger.error(f"Facebook post failed: {error_msg}. Response: {response.text}")
                 return False, error_msg
                 
+        except requests.exceptions.RequestException as req_err:
+            logger.error(f"Network or request error during Facebook upload: {req_err}")
+            return False, str(req_err)
         except Exception as e:
             logger.error(f"Facebook upload error: {e}")
             return False, str(e)
 
-    def upload_image_to_instagram(self, image_url, caption, hashtags):
+    def upload_image_to_instagram(self, image_url: str, caption: str, hashtags: str) -> tuple[bool, str]:
         """Upload image to Instagram using image_url parameter (2-step process)"""
         try:
             full_caption = f"{caption}\n\n{hashtags}"
@@ -232,39 +284,48 @@ class SocialMediaPoster:
                 'access_token': self.access_token
             }
             
+            logger.info(f"Attempting Instagram media creation for image URL: {image_url}...")
             response = requests.post(self.instagram_api_url, data=data, timeout=60)
             
             if response.status_code != 200:
-                error_msg = response.json().get('error', {}).get('message', 'Unknown error')
-                logger.error(f"Instagram media creation failed: {error_msg}")
+                error_msg = response.json().get('error', {}).get('message', 'Unknown Instagram creation error')
+                logger.error(f"Instagram media creation failed: {error_msg}. Response: {response.text}")
                 return False, error_msg
             
             container_id = response.json().get('id')
-            logger.info(f"Instagram media container created: {container_id}")
-            
-            time.sleep(2)
-            
+            if not container_id:
+                logger.error(f"Instagram media creation did not return a container ID. Response: {response.text}")
+                return False, "No container ID returned for Instagram media creation."
+
+            logger.info(f"Instagram media container created: {container_id}. Waiting before publishing...")
+            time.sleep(2) # Wait for container to be ready
+
             publish_data = {
                 'creation_id': container_id,
                 'access_token': self.access_token
             }
             
+            logger.info(f"Attempting Instagram publish for container ID: {container_id}...")
             publish_response = requests.post(self.instagram_publish_url, data=publish_data, timeout=60)
             
             if publish_response.status_code == 200:
                 result = publish_response.json()
-                logger.info(f"Instagram post successful! Post ID: {result.get('id', 'Unknown')}")
-                return True, result.get('id')
+                post_id = result.get('id', 'Unknown')
+                logger.info(f"Instagram post successful! Post ID: {post_id}")
+                return True, post_id
             else:
-                error_msg = publish_response.json().get('error', {}).get('message', 'Unknown error')
-                logger.error(f"Instagram publish failed: {error_msg}")
+                error_msg = publish_response.json().get('error', {}).get('message', 'Unknown Instagram publish error')
+                logger.error(f"Instagram publish failed: {error_msg}. Response: {publish_response.text}")
                 return False, error_msg
                 
+        except requests.exceptions.RequestException as req_err:
+            logger.error(f"Network or request error during Instagram upload: {req_err}")
+            return False, str(req_err)
         except Exception as e:
             logger.error(f"Instagram upload error: {e}")
             return False, str(e)
 
-    def get_pending_posts(self, spreadsheet_url=None):
+    def get_pending_posts(self, spreadsheet_url: str = None) -> list[dict]:
         """Get all pending posts from the spreadsheet"""
         if not spreadsheet_url:
             spreadsheet_url = self.default_spreadsheet_url
@@ -274,15 +335,22 @@ class SocialMediaPoster:
         if df is None:
             return []
         
-        # Map column names
+        # Map column names - ensure these match your Google Sheet exactly
         date_col = 'Date'
         time_col = 'Post Timings'
         caption_col = 'Caption'
         hashtags_col = 'Hashtags'
         imageurl_col = 'Filename.jpg'
-        status_col = 'Status'
-        
+        status_col = 'Status' # Make sure this column exists
+
+        # Check if all required columns exist
+        required_cols = [date_col, time_col, caption_col, hashtags_col, imageurl_col, status_col]
+        if not all(col in df.columns for col in required_cols):
+            logger.error(f"Missing one or more required columns in spreadsheet. Expected: {required_cols}. Found: {df.columns.tolist()}")
+            return []
+
         # Filter pending posts
+        # Handle NaN values for 'Status' explicitly
         pending_posts = df[
             (df[status_col].astype(str).str.lower().isin(['pending', 'scheduled', ''])) |
             (df[status_col].isna()) |
@@ -296,9 +364,10 @@ class SocialMediaPoster:
                 time_val = row[time_col]
                 
                 if pd.isna(date_val) or pd.isna(time_val):
+                    logger.warning(f"Skipping row {index + 1} due to missing Date or Post Timings.")
                     continue
                 
-                scheduled_datetime = self.parse_datetime(date_val, time_val)
+                scheduled_datetime = self.parse_datetime(str(date_val), str(time_val))
                 
                 posts_data.append({
                     'index': int(index),
@@ -311,11 +380,12 @@ class SocialMediaPoster:
                     'status': str(row[status_col])
                 })
             except Exception as e:
-                continue
+                logger.error(f"Error processing pending post at row {index + 1}: {e}")
+                continue # Continue to next row even if one fails
         
         return posts_data
 
-    def process_scheduled_posts(self, spreadsheet_url=None, tolerance_minutes=10):
+    def process_scheduled_posts(self, spreadsheet_url: str = None, tolerance_minutes: int = 10) -> list[dict]:
         """Process posts that are scheduled for the current time"""
         if not spreadsheet_url:
             spreadsheet_url = self.default_spreadsheet_url
@@ -323,18 +393,25 @@ class SocialMediaPoster:
         df = self.load_google_spreadsheet(spreadsheet_url)
         
         if df is None:
+            logger.error("Could not load spreadsheet data. Aborting post processing.")
             return []
         
         logger.info(f"Loaded {len(df)} posts from Google Spreadsheet")
         
-        # Map column names
+        # Map column names - ensure these match your Google Sheet exactly
         date_col = 'Date'
         time_col = 'Post Timings'
         caption_col = 'Caption'
         hashtags_col = 'Hashtags'
         imageurl_col = 'Filename.jpg'
-        status_col = 'Status'
-        
+        status_col = 'Status' # Make sure this column exists
+
+        # Check if all required columns exist
+        required_cols = [date_col, time_col, caption_col, hashtags_col, imageurl_col, status_col]
+        if not all(col in df.columns for col in required_cols):
+            logger.error(f"Missing one or more required columns in spreadsheet. Expected: {required_cols}. Aborting.")
+            return []
+
         # Filter pending posts
         pending_posts = df[
             (df[status_col].astype(str).str.lower().isin(['pending', 'scheduled', ''])) |
@@ -353,9 +430,10 @@ class SocialMediaPoster:
                 time_val = row[time_col]
                 
                 if pd.isna(date_val) or pd.isna(time_val):
+                    logger.warning(f"Row {index + 1} has missing Date or Post Timings. Skipping.")
                     continue
                 
-                scheduled_datetime = self.parse_datetime(date_val, time_val)
+                scheduled_datetime = self.parse_datetime(str(date_val), str(time_val))
                 
                 if scheduled_datetime and self.is_time_to_post(scheduled_datetime, tolerance_minutes):
                     ready_posts.append({
@@ -384,29 +462,40 @@ class SocialMediaPoster:
                 caption = str(row[caption_col]).strip()
                 hashtags = str(row[hashtags_col]).strip()
                 
-                logger.info(f"Processing post for row {index + 1}")
+                logger.info(f"Processing post for row {index + 1} (Image: {image_url})")
                 
-                # Download image for Facebook
+                # Download image for Facebook (required local path for Facebook API)
                 temp_image_path = self.download_image_from_url(image_url)
                 
                 if not temp_image_path:
+                    error_msg = 'Could not download image'
+                    logger.error(f"Skipping post for row {index + 1}: {error_msg}")
                     results.append({
                         'index': index,
                         'image_url': image_url,
                         'caption': caption,
                         'facebook_success': False,
                         'instagram_success': False,
-                        'error': 'Could not download image'
+                        'error': error_msg
                     })
+                    self.update_google_spreadsheet_status(index, "Failed: " + error_msg, spreadsheet_url)
                     continue
                 
                 # Post to Facebook
                 fb_success, fb_result = self.upload_image_to_facebook(temp_image_path, caption, hashtags)
-                time.sleep(3)
+                time.sleep(3) # Short delay between platforms
                 
-                # Post to Instagram
+                # Post to Instagram (uses image URL directly)
                 ig_success, ig_result = self.upload_image_to_instagram(image_url, caption, hashtags)
                 
+                status_message = "Posted"
+                if not fb_success and not ig_success:
+                    status_message = "Failed All"
+                elif not fb_success:
+                    status_message = "Failed FB"
+                elif not ig_success:
+                    status_message = "Failed IG"
+
                 results.append({
                     'index': index,
                     'image_url': image_url,
@@ -414,25 +503,32 @@ class SocialMediaPoster:
                     'facebook_success': fb_success,
                     'instagram_success': ig_success,
                     'facebook_result': fb_result,
-                    'instagram_result': ig_result
+                    'instagram_result': ig_result,
+                    'status': status_message # Add status to result for better reporting
                 })
                 
-                time.sleep(5)
+                # Update status in Google Sheet
+                self.update_google_spreadsheet_status(index, status_message, spreadsheet_url)
+                
+                time.sleep(5) # Delay before processing next post
                 
             except Exception as e:
-                logger.error(f"Error processing post at row {index + 1}: {e}")
+                logger.error(f"Error processing post at row {index + 1}: {e}", exc_info=True) # Log full traceback
+                error_msg_full = f"Unhandled error: {e}"
                 results.append({
                     'index': index,
                     'image_url': row.get(imageurl_col, 'unknown'),
                     'caption': str(row.get(caption_col, '')),
                     'facebook_success': False,
                     'instagram_success': False,
-                    'error': str(e)
+                    'error': error_msg_full,
+                    'status': "Failed: Unhandled Error"
                 })
+                self.update_google_spreadsheet_status(index, "Failed: Unhandled Error", spreadsheet_url)
             finally:
                 if temp_image_path:
                     self.cleanup_temp_file(temp_image_path)
-        
+
         return results
 
 # Initialize Flask app
@@ -533,7 +629,7 @@ HTML_TEMPLATE = """
                         <td>${caption}</td>
                         <td>${fbStatus}</td>
                         <td>${igStatus}</td>
-                        <td>${result.error || 'Success'}</td>
+                        <td>${result.status || 'Success'}</td>
                     </tr>`;
                 });
                 
@@ -637,7 +733,7 @@ def run_scheduler():
         })
         
     except Exception as e:
-        logger.error(f"Error running scheduler: {e}")
+        logger.error(f"Error running scheduler: {e}", exc_info=True)
         return jsonify({
             'error': str(e)
         }), 500
@@ -654,7 +750,7 @@ def get_pending_posts():
         })
         
     except Exception as e:
-        logger.error(f"Error getting pending posts: {e}")
+        logger.error(f"Error getting pending posts: {e}", exc_info=True)
         return jsonify({
             'error': str(e)
         }), 500
@@ -671,7 +767,7 @@ def get_status():
         })
         
     except Exception as e:
-        logger.error(f"Error getting status: {e}")
+        logger.error(f"Error getting status: {e}", exc_info=True)
         return jsonify({
             'error': str(e)
         }), 500
