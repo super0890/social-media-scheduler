@@ -1,4 +1,6 @@
+cat > requirements.txt << 'EOF'
 Flask==2.3.3
 requests==2.31.0
 pandas==2.0.3
 gunicorn==21.2.0
+EOF
