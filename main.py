@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Social Media Auto Poster - Complete Working Version
-Includes Instagram fix and all functionality
+Social Media Auto Poster with Flask HTTP Server
+Includes Instagram fix, all functionality, and web interface
 """
 
 import requests
@@ -12,6 +12,9 @@ from datetime import datetime, timedelta
 import json
 from io import BytesIO, StringIO
 import tempfile
+from flask import Flask, jsonify, request, render_template_string
+import threading
+import schedule
 
 class SocialMediaPoster:
     def __init__(self):
@@ -26,6 +29,9 @@ class SocialMediaPoster:
         self.facebook_api_url = f"https://graph.facebook.com/v18.0/{self.facebook_page_id}/photos"
         self.instagram_api_url = f"https://graph.facebook.com/v18.0/{self.instagram_id}/media"
         self.instagram_publish_url = f"https://graph.facebook.com/v18.0/{self.instagram_id}/media_publish"
+        
+        # Default spreadsheet URL
+        self.default_spreadsheet_url = "https://docs.google.com/spreadsheets/d/14mo8-qCZNcOeNSsY_GRwHOPyH4LjY5iRneWahK75cZM/edit?pli=1&gid=0#gid=0"
 
     def load_google_spreadsheet(self, spreadsheet_url):
         """Load data directly from Google Spreadsheet using CSV export URL"""
@@ -271,13 +277,67 @@ class SocialMediaPoster:
         print(f"📝 Status update needed for row {row_index + 1}: {new_status}")
         print("💡 To automatically update status in Google Sheets, you'll need to set up Google Sheets API")
 
-    def process_scheduled_posts(self, spreadsheet_url, tolerance_minutes=10):
+    def get_pending_posts(self, spreadsheet_url=None):
+        """Get all pending posts from the spreadsheet"""
+        if not spreadsheet_url:
+            spreadsheet_url = self.default_spreadsheet_url
+            
+        df = self.load_google_spreadsheet(spreadsheet_url)
+        
+        if df is None:
+            return []
+        
+        # Map column names
+        date_col = 'Date'
+        time_col = 'Post Timings'
+        caption_col = 'Caption'
+        hashtags_col = 'Hashtags'
+        imageurl_col = 'Filename.jpg'
+        status_col = 'Status'
+        
+        # Filter pending posts
+        pending_posts = df[
+            (df[status_col].astype(str).str.lower().isin(['pending', 'scheduled', ''])) |
+            (df[status_col].isna()) |
+            (df[status_col].astype(str).str.strip() == '')
+        ].copy()
+        
+        posts_data = []
+        for index, row in pending_posts.iterrows():
+            try:
+                date_val = row[date_col]
+                time_val = row[time_col]
+                
+                if pd.isna(date_val) or pd.isna(time_val):
+                    continue
+                
+                scheduled_datetime = self.parse_datetime(date_val, time_val)
+                
+                posts_data.append({
+                    'index': int(index),
+                    'date': str(date_val),
+                    'time': str(time_val),
+                    'scheduled_datetime': scheduled_datetime.strftime('%Y-%m-%d %H:%M') if scheduled_datetime else 'Invalid',
+                    'caption': str(row[caption_col])[:100] + '...' if len(str(row[caption_col])) > 100 else str(row[caption_col]),
+                    'hashtags': str(row[hashtags_col]),
+                    'image_url': str(row[imageurl_col]),
+                    'status': str(row[status_col])
+                })
+            except Exception as e:
+                continue
+        
+        return posts_data
+
+    def process_scheduled_posts(self, spreadsheet_url=None, tolerance_minutes=10):
         """Process posts that are scheduled for the current time from Google Spreadsheet"""
+        if not spreadsheet_url:
+            spreadsheet_url = self.default_spreadsheet_url
+            
         df = self.load_google_spreadsheet(spreadsheet_url)
         
         if df is None:
             print("❌ Could not load Google Spreadsheet data")
-            return
+            return []
         
         print(f"📊 Loaded {len(df)} posts from Google Spreadsheet")
         current_time = datetime.now()
@@ -336,7 +396,7 @@ class SocialMediaPoster:
         print(f"🎯 Found {len(ready_posts)} posts ready to publish now")
         
         if len(ready_posts) == 0:
-            print("😴 No posts scheduled for this time. Exiting.")
+            print("😴 No posts scheduled for this time.")
             return []
         
         results = []
@@ -448,22 +508,121 @@ class SocialMediaPoster:
                 if 'error' in post:
                     print(f"     Error: {post['error']}")
 
-def main():
-    """Main function to run the social media poster"""
-    poster = SocialMediaPoster()
-    
-    # Configuration
-    spreadsheet_url = "https://docs.google.com/spreadsheets/d/14mo8-qCZNcOeNSsY_GRwHOPyH4LjY5iRneWahK75cZM/edit?pli=1&gid=0#gid=0"
-    tolerance_minutes = 10  # How many minutes early/late to allow posting
-    
-    print("🚀 Starting Social Media Auto Poster")
-    print("="*60)
-    
-    # Process posts (only those scheduled for current time)
-    results = poster.process_scheduled_posts(spreadsheet_url, tolerance_minutes)
-    
-    print("\n✅ Script completed!")
-    print(f"\n💡 TIP: Run this script every {tolerance_minutes} minutes to automatically post scheduled content")
+# Flask Web App
+app = Flask(__name__)
+poster = SocialMediaPoster()
 
-if __name__ == "__main__":
-    main()
+# HTML Template for the web interface
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Social Media Auto Poster</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }
+        .container { max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1 { color: #333; text-align: center; }
+        .status { padding: 10px; margin: 10px 0; border-radius: 5px; }
+        .success { background-color: #d4edda; border: 1px solid #c3e6cb; color: #155724; }
+        .error { background-color: #f8d7da; border: 1px solid #f5c6cb; color: #721c24; }
+        .info { background-color: #d1ecf1; border: 1px solid #bee5eb; color: #0c5460; }
+        .button { background-color: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; margin: 5px; }
+        .button:hover { background-color: #0056b3; }
+        .button.danger { background-color: #dc3545; }
+        .button.danger:hover { background-color: #c82333; }
+        .post-card { border: 1px solid #ddd; padding: 15px; margin: 10px 0; border-radius: 5px; background: #fafafa; }
+        .post-meta { font-size: 0.9em; color: #666; margin-bottom: 10px; }
+        .post-content { margin: 10px 0; }
+        .image-preview { max-width: 100px; height: auto; border-radius: 5px; }
+        table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background-color: #f8f9fa; }
+        .loading { display: none; text-align: center; padding: 20px; }
+        .spinner { border: 4px solid #f3f3f3; border-top: 4px solid #3498db; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 0 auto; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Social Media Auto Poster Dashboard</h1>
+        
+        <p class="info status">
+            <strong>Current Time:</strong> <span id="current-time"></span><br>
+            <strong>Server Status:</strong> <span style="color: green;">🟢 Online</span>
+        </p>
+        
+        <div style="text-align: center; margin: 20px 0;">
+            <button class="button" onclick="checkScheduled()">📅 Check Scheduled Posts</button>
+            <button class="button" onclick="runScheduler()">▶️ Run Scheduler Now</button>
+            <button class="button" onclick="viewPendingPosts()">📋 View Pending Posts</button>
+            <button class="button danger" onclick="location.reload()">🔄 Refresh Page</button>
+        </div>
+        
+        <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <p>Processing...</p>
+        </div>
+        
+        <div id="results"></div>
+    </div>
+
+    <script>
+        function updateTime() {
+            const now = new Date();
+            document.getElementById('current-time').textContent = now.toLocaleString();
+        }
+        
+        function showLoading() {
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('results').innerHTML = '';
+        }
+        
+        function hideLoading() {
+            document.getElementById('loading').style.display = 'none';
+        }
+        
+        function displayResults(data, title) {
+            hideLoading();
+            let html = `<h2>${title}</h2>`;
+            
+            if (data.error) {
+                html += `<div class="error status">❌ Error: ${data.error}</div>`;
+            } else if (data.message) {
+                html += `<div class="info status">ℹ️ ${data.message}</div>`;
+            } else if (data.results && data.results.length > 0) {
+                html += `<div class="success status">✅ Processed ${data.results.length} posts</div>`;
+                html += '<table><tr><th>Row</th><th>Image</th><th>Caption</th><th>Facebook</th><th>Instagram</th><th>Status</th></tr>';
+                
+                data.results.forEach(result => {
+                    const fbStatus = result.facebook_success ? '✅' : '❌';
+                    const igStatus = result.instagram_success ? '✅' : '❌';
+                    const caption = result.caption ? result.caption.substring(0, 50) + '...' : 'No caption';
+                    
+                    html += `<tr>
+                        <td>${result.index + 1}</td>
+                        <td><img src="${result.image_url}" class="image-preview" onerror="this.src='data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgdmlld0JveD0iMCAwIDEwMCAxMDAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHJlY3Qgd2lkdGg9IjEwMCIgaGVpZ2h0PSIxMDAiIGZpbGw9IiNmMGYwZjAiLz48dGV4dCB4PSI1MCIgeT0iNTAiIGZvbnQtZmFtaWx5PSJBcmlhbCIgZm9udC1zaXplPSIxMiIgZmlsbD0iIzk5OSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZHk9Ii4zZW0iPk5vIEltYWdlPC90ZXh0Pjwvc3ZnPg=='"></td>
+                        <td>${caption}</td>
+                        <td>${fbStatus}</td>
+                        <td>${igStatus}</td>
+                        <td>${result.error || 'Success'}</td>
+                    </tr>`;
+                });
+                
+                html += '</table>';
+            } else if (data.posts && data.posts.length > 0) {
+                html += `<div class="info status">📋 Found ${data.posts.length} pending posts</div>`;
+                
+                data.posts.forEach(post => {
+                    html += `<div class="post-card">
+                        <div class="post-meta">
+                            <strong>Row ${post.index + 1}</strong> | 
+                            Scheduled: ${post.scheduled_datetime} | 
+                            Status: ${post.status}
+                        </div>
+                        <div class="post-content">
+                            <strong>Caption:</strong> ${post.caption}<br>
+                            <strong>Hashtags:</strong> ${post.hashtags}<br>
+                            <strong>Image:</strong> <a href="${post.image_url}" target="_blank">View Image</a>
+                        </div>
+                    </div
